@@ -137,7 +137,6 @@ func main(){
 
     defer sortCursor.Close(ctx)
 
-   // var total int64 = 0
     for sortCursor.Next(ctx) {
         var orders bson.M
         if err = sortCursor.Decode(&orders); err!= nil {
@@ -154,7 +153,7 @@ func main(){
 
     }
 
-        for key,element := range badOrders {
+      for key,element := range badOrders {
              fmt.Println("OrderId:",key," confirmPartner:",element)
       }
 
