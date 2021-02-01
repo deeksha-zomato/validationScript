@@ -5,6 +5,7 @@ import (
     "log"
     "fmt"
     "time"
+    "sync"
 
     "go.mongodb.org/mongo-driver/mongo"
     "go.mongodb.org/mongo-driver/mongo/options"
@@ -17,100 +18,92 @@ var connectionURI string = "mongodb://localhost:27017/"
 var lowerLimit int64 = 1511144000000
 var upperLimit int64 = 1711348800000
 
-var orderRoutines map[int32] int32
-var orderLastState map[int32] int32
-var badOrders map[int32] string
+var orderRoutines sync.Map
+var orderLastState sync.Map
+var badOrders sync.Map
 
-func routine(orderId int32,confirmPartner string,statusCode int32,isRPF bool) {
+func routine(orderId int32,confirmPartner string,statusCode int,isRPF bool) {
     defer func() {
 		if err := recover(); err != nil {
 			fmt.Println(err)
 		}
 	}()
-    if val, ok := orderRoutines[orderId]; !ok {
-        val=0
-        orderRoutines[orderId] = val
+    if _, ok := orderRoutines.Load(orderId); !ok {
+        orderRoutines.Store(orderId,0)
     }
-    orderRoutines[orderId]++
-    //time.Sleep(10 * time.Millisecond)
+    if val, ok := orderRoutines.Load(orderId); ok {
+        orderRoutines.Store(orderId,val.(int)+1)
+    }
     for {
-        if orderRoutines[orderId]>1 {
-            time.Sleep(1 * time.Millisecond)
+        if val,_ :=orderRoutines.Load(orderId); val.(int)>1 {
+            time.Sleep(10 * time.Millisecond)
         }else if isRPF{
             if statusCode == 80{
-            }else if orderLastState[orderId] == 10 {
+            }else if val,_:=orderLastState.Load(orderId); val.(int)==10{
                 if statusCode == 30{
-                    orderLastState[orderId] = 30
+                    orderLastState.Store(orderId, 30)
                 }else{
-                     if value, ok := badOrders[orderId]; !ok {
-                         value = confirmPartner
-                         badOrders[orderId] = value
+                     if _, ok := badOrders.Load(orderId); !ok {
+                        badOrders.Store(orderId,confirmPartner)
                      }
                 }
-            }else if orderLastState[orderId] == 40 {
+            }else if val,_:=orderLastState.Load(orderId); val.(int)==40{
                  if statusCode == 20{
-                     orderLastState[orderId] = 20
+                     orderLastState.Store(orderId,20)
                  }else{
-                      if value, ok := badOrders[orderId]; !ok {
-                          value = confirmPartner
-                          badOrders[orderId] = value
+                      if _, ok := badOrders.Load(orderId); !ok {
+                          badOrders.Store(orderId,confirmPartner)
                       }
                  }
-             }else if orderLastState[orderId] == 20 {
+            }else if val,_:=orderLastState.Load(orderId); val.(int)==20{
                   if statusCode == 50{
-                      orderLastState[orderId] = 50
+                      orderLastState.Store(orderId,50)
                   }else{
-                       if value, ok := badOrders[orderId]; !ok {
-                           value = confirmPartner
-                           badOrders[orderId] = value
+                       if _, ok := badOrders.Load(orderId); !ok {
+                           badOrders.Store(orderId,confirmPartner)
                        }
                   }
-              }else if orderLastState[orderId] == statusCode-10 {
-                   orderLastState[orderId]= statusCode
-               }else if _, found := badOrders[orderId]; found {
+            }else if val,_:=orderLastState.Load(orderId); val.(int)==statusCode-10 {
+                      orderLastState.Store(orderId,statusCode)
+            }else if _, found := badOrders.Load(orderId); found {
 
-               }else{
-                   if value, ok := badOrders[orderId]; !ok {
-                       value = confirmPartner
-                       badOrders[orderId] = value
+            }else{
+                   if _, ok := badOrders.Load(orderId); !ok {
+                       badOrders.Store(orderId,confirmPartner)
                    }
-               }
-               break
-
+            }
+            break
         }else{
-            if val,ok := orderLastState[orderId];!ok {
+            if _,ok := orderLastState.Load(orderId);!ok {
                 if statusCode == 10{
-                    val=10
-                    orderLastState[orderId] = val
+                    orderLastState.Store(orderId, 10)
                 }else{
-                    if value, okay := badOrders[orderId]; !okay {
-                        value = confirmPartner
-                        badOrders[orderId] = value
-                    }
+                    if _, ok := badOrders.Load(orderId); !ok {
+                        badOrders.Store(orderId,confirmPartner)
+                      }
                 }
             }else if statusCode == 80{
 
-            }else if orderLastState[orderId] == statusCode-10 {
-                orderLastState[orderId]= statusCode
-            }else if _, found := badOrders[orderId]; found {
+            }else if val,_:=orderLastState.Load(orderId); val.(int)==statusCode-10 {
+                orderLastState.Store(orderId,statusCode)
+            }else if _, found := badOrders.Load(orderId); found {
 
             }else{
-                if value, ok := badOrders[orderId]; !ok {
-                    value = confirmPartner
-                    badOrders[orderId] = value
-                }
+                if _, ok := badOrders.Load(orderId); !ok {
+                    badOrders.Store(orderId,confirmPartner)
+                  }
             }
             break
         }
     }
-    orderRoutines[orderId]--
+    if val, ok := orderRoutines.Load(orderId); ok {
+        orderRoutines.Store(orderId,val.(int)-1)
+    }
 }
 
 
 func main(){
-    orderRoutines = make(map[int32] int32)
-    orderLastState = make(map[int32] int32)
-    badOrders = make(map[int32] string)
+
     client, err := mongo.NewClient(options.Client().ApplyURI(connectionURI))
     if err!= nil{
         log.Fatal(err)
@@ -128,10 +121,13 @@ func main(){
     opts := options.Find()
     opts.SetBatchSize(1000)
     opts.SetSort(bson.D{{"_id",1}})
+
     sortCursor, err := ordersCollection.Find(ctx,bson.D{
-        { "doc_meta.created_at", bson.D{
+        // Include all the orders that are updated within the given time interval
+        //and two hrs ahead of it
+        { "doc_meta.updated_at", bson.D{
              {"$gte",lowerLimit},
-             {"$lte",upperLimit},
+             {"$lte",upperLimit+7200},
         }},
     },opts)
 
@@ -142,23 +138,33 @@ func main(){
         if err = sortCursor.Decode(&orders); err!= nil {
             log.Fatal(err)
         }
-        var status_code int32 = orders["state"].(int32)
+        var status_code int = int(orders["state"].(int32))
         var reference_id int32 = orders["ref_id"].(int32)
         var order bson.M = (orders["order"].(interface{})).(bson.M)
         var is_rpf bool = order["is_rpf"].(bool)
-
+        var doc_meta bson.M = (orders["doc_meta"].(interface{})).(bson.M)
+        var created_at int64 = doc_meta["created_at"].(int64)
         var confirm_partner = orders["confirm_partner"].(string)
 
-        go routine(reference_id,confirm_partner,status_code,is_rpf)
-
+        if created_at>=lowerLimit && created_at<=upperLimit {
+            //Take the orders that are created within the given time interval
+            go routine(reference_id,confirm_partner,status_code,is_rpf)
+        }
     }
 
-      for key,element := range badOrders {
-             fmt.Println("OrderId:",key," confirmPartner:",element)
-      }
+    cnt:=0
+    tot:=0
+    badOrders.Range(func(key, value interface{}) bool {
+        fmt.Println("referenceId:",key.(int32),"confirmPartner:",value.(string))
+        cnt++
+        return true
+    })
+    orderRoutines.Range(func(_, _ interface{}) bool {
+        tot++
+        return true
+    })
 
-      fmt.Printf("total number of bad orders under consideration: %d \n",len(badOrders))
-      fmt.Printf("total number of orders under consideration: %d \n",len(orderLastState))
-
+    fmt.Printf("total number of bad orders under consideration: %d \n",cnt)
+    fmt.Printf("total number of orders under consideration: %d \n",tot)
 
 }
