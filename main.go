@@ -6,23 +6,41 @@ import (
     "fmt"
     "time"
     "sync"
+    "os"
+    "strconv"
 
     "go.mongodb.org/mongo-driver/mongo"
     "go.mongodb.org/mongo-driver/mongo/options"
     "go.mongodb.org/mongo-driver/bson"
 )
 
+type OrderStatus int
+
+const (
+	OsCreated         OrderStatus = 10
+	OsConfirmed       OrderStatus = 20
+	OsAssigned        OrderStatus = 30
+	OsReachedPickup   OrderStatus = 40
+	OsPickedUp        OrderStatus = 50
+	OsReachedDrop     OrderStatus = 60
+	OsCompleted       OrderStatus = 70
+	OsCanceled        OrderStatus = 80
+	OsReturnInit      OrderStatus = 90
+	OsReturnAssigned  OrderStatus = 100
+	OsReturnCompleted OrderStatus = 110
+	OsReturnCancelled OrderStatus = 120
+)
+
+
 var DATABASE string = "db"
 var COLLECTION string = "auditTable"
 var connectionURI string = "mongodb://localhost:27017/"
-var lowerLimit int64 = 1511144000000
-var upperLimit int64 = 1711348800000
 
 var orderRoutines sync.Map
 var orderLastState sync.Map
 var badOrders sync.Map
 
-func routine(orderId int32,confirmPartner string,statusCode int,isRPF bool) {
+func routine(orderId int32,confirmPartner string,statusCode OrderStatus,isRPF bool) {
     defer func() {
 		if err := recover(); err != nil {
 			fmt.Println(err)
@@ -38,32 +56,32 @@ func routine(orderId int32,confirmPartner string,statusCode int,isRPF bool) {
         if val,_ :=orderRoutines.Load(orderId); val.(int)>1 {
             time.Sleep(10 * time.Millisecond)
         }else if isRPF{
-            if statusCode == 80{
-            }else if val,_:=orderLastState.Load(orderId); val.(int)==10{
-                if statusCode == 30{
-                    orderLastState.Store(orderId, 30)
+            if statusCode == OsCanceled {
+            }else if val,_:=orderLastState.Load(orderId); val.(OrderStatus)==OsCreated{
+                if statusCode == OsAssigned{
+                    orderLastState.Store(orderId, OsAssigned)
                 }else{
                      if _, ok := badOrders.Load(orderId); !ok {
                         badOrders.Store(orderId,confirmPartner)
                      }
                 }
-            }else if val,_:=orderLastState.Load(orderId); val.(int)==40{
-                 if statusCode == 20{
-                     orderLastState.Store(orderId,20)
+            }else if val,_:=orderLastState.Load(orderId); val.(OrderStatus)==OsReachedPickup{
+                 if statusCode == OsConfirmed{
+                     orderLastState.Store(orderId,OsConfirmed)
                  }else{
                       if _, ok := badOrders.Load(orderId); !ok {
                           badOrders.Store(orderId,confirmPartner)
                       }
                  }
-            }else if val,_:=orderLastState.Load(orderId); val.(int)==20{
-                  if statusCode == 50{
-                      orderLastState.Store(orderId,50)
+            }else if val,_:=orderLastState.Load(orderId); val.(OrderStatus)==OsConfirmed{
+                  if statusCode == OsPickedUp{
+                      orderLastState.Store(orderId,OsPickedUp)
                   }else{
                        if _, ok := badOrders.Load(orderId); !ok {
                            badOrders.Store(orderId,confirmPartner)
                        }
                   }
-            }else if val,_:=orderLastState.Load(orderId); val.(int)==statusCode-10 {
+            }else if val,_:=orderLastState.Load(orderId); val.(OrderStatus)==statusCode-10 {
                       orderLastState.Store(orderId,statusCode)
             }else if _, found := badOrders.Load(orderId); found {
 
@@ -75,16 +93,16 @@ func routine(orderId int32,confirmPartner string,statusCode int,isRPF bool) {
             break
         }else{
             if _,ok := orderLastState.Load(orderId);!ok {
-                if statusCode == 10{
-                    orderLastState.Store(orderId, 10)
+                if statusCode == OsCreated{
+                    orderLastState.Store(orderId, OsCreated)
                 }else{
                     if _, ok := badOrders.Load(orderId); !ok {
                         badOrders.Store(orderId,confirmPartner)
                       }
                 }
-            }else if statusCode == 80{
+            }else if statusCode == OsCanceled{
 
-            }else if val,_:=orderLastState.Load(orderId); val.(int)==statusCode-10 {
+            }else if val,_:=orderLastState.Load(orderId); val.(OrderStatus)==statusCode-10 {
                 orderLastState.Store(orderId,statusCode)
             }else if _, found := badOrders.Load(orderId); found {
 
@@ -103,6 +121,8 @@ func routine(orderId int32,confirmPartner string,statusCode int,isRPF bool) {
 
 
 func main(){
+    lowerLimit,_ := strconv.ParseInt(os.Args[1],10,64)
+    upperLimit,_ := strconv.ParseInt(os.Args[2],10,64)
 
     client, err := mongo.NewClient(options.Client().ApplyURI(connectionURI))
     if err!= nil{
@@ -138,7 +158,7 @@ func main(){
         if err = sortCursor.Decode(&orders); err!= nil {
             log.Fatal(err)
         }
-        var status_code int = int(orders["state"].(int32))
+        var status_code OrderStatus = OrderStatus(orders["state"].(int32))
         var reference_id int32 = orders["ref_id"].(int32)
         var order bson.M = (orders["order"].(interface{})).(bson.M)
         var is_rpf bool = order["is_rpf"].(bool)
@@ -152,8 +172,8 @@ func main(){
         }
     }
 
-    cnt:=0
-    tot:=0
+    cnt:=0 //counts the number of bad orders
+    tot:=0 //counts the total number of orders
     badOrders.Range(func(key, value interface{}) bool {
         fmt.Println("referenceId:",key.(int32),"confirmPartner:",value.(string))
         cnt++
